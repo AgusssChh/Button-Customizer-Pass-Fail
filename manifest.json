@@ -1,0 +1,11 @@
+{
+  "name": "Pass/Fail + KING Button Customizer",
+  "package": "passfail_king_buttons",
+  "author": "Merged from Pass/Fail 2 and The KING of Button Add-ons; compatibility work for Anki 26.09.4+fsrs7",
+  "version": "1.0.1",
+  "homepage": "https://github.com/lambdadog/passfail2",
+  "conflicts": [
+    "PassFail2",
+    "374005964"
+  ]
+}
