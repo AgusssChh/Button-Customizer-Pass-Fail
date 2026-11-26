@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from aqt import mw
+
+ADDON_ID = "passfail_king_buttons"
 
 DEFAULTS: dict[str, Any] = {
     "button_count": 2,
@@ -12,7 +16,7 @@ DEFAULTS: dict[str, Any] = {
     "hard_name": "Hard",
     "good_name": "Pass",
     "easy_name": "Easy",
-    "color_mode": "colors",  # default, text, hover, colors
+    "color_mode": "colors",
     "light_background_again": "#ff6961",
     "light_background_hard": "#ffb861",
     "light_background_good": "#61ffb8",
@@ -30,10 +34,11 @@ DEFAULTS: dict[str, Any] = {
     "dark_text_good": "#ffffff",
     "dark_text_easy": "#ffffff",
     "border_radius": 15,
-    "button_font_size": "S",
-    "button_height": "S",
-    "button_width": "S",
-    "answer_button_width": "full",
+    "button_font_size_px": 14,
+    "button_height_px": 25,
+    "button_width_px": 42,
+    "answer_button_width_px": 530,
+    "bottom_bar_height_px": 0,
     "confirmation": True,
     "confirmation_time": 450,
     "confirmation_x_offset": 0,
@@ -45,35 +50,97 @@ DEFAULTS: dict[str, Any] = {
     "migrate_old_settings": True,
 }
 
+_OLD_SIZE_MAPS = {
+    "button_font_size": {"s": 14, "m": 16, "l": 20},
+    "button_height": {"s": 25, "m": 40, "l": 60},
+    "button_width": {"s": 42, "m": 82, "l": 122},
+    "answer_button_width": {"full": 530, "normal": 120},
+}
+
 _config: dict[str, Any] | None = None
 
 
-def _addon_name() -> str:
-    return mw.addonManager.addonFromModule(__name__)
+def _addon_dir() -> Path:
+    return Path(mw.addonManager.addonsFolder(ADDON_ID))
 
 
-def _load_raw() -> dict[str, Any]:
-    raw = mw.addonManager.getConfig(__name__) or {}
-    merged = deepcopy(DEFAULTS)
-    merged.update(raw)
-    return merged
+def _meta_path() -> Path:
+    return _addon_dir() / "meta.json"
 
 
-def _try_get_addon_config(name: str) -> dict[str, Any]:
+def _defaults_path() -> Path:
+    return _addon_dir() / "config.json"
+
+
+def _load_defaults() -> dict[str, Any]:
     try:
-        data = mw.addonManager.getConfig(name)
-        return data if isinstance(data, dict) else {}
+        with _defaults_path().open(encoding="utf-8") as f:
+            value = json.load(f)
+        if isinstance(value, dict):
+            defaults = deepcopy(DEFAULTS)
+            defaults.update(value)
+            return defaults
+    except Exception:
+        pass
+    return deepcopy(DEFAULTS)
+
+
+def _load_user_config_from_meta() -> dict[str, Any]:
+    """Read Anki's persisted add-on config directly from meta.json.
+
+    This deliberately bypasses any intermediary in-memory state so the Tools
+    window sees changes made through Anki's built-in Add-ons > Config editor.
+    """
+    try:
+        with _meta_path().open(encoding="utf-8") as f:
+            meta = json.load(f)
+        value = meta.get("config", {})
+        return value if isinstance(value, dict) else {}
     except Exception:
         return {}
 
 
-def _migrate_once(data: dict[str, Any]) -> None:
+def _write_user_config(conf: dict[str, Any]) -> None:
+    """Persist through Anki's API and leave meta.json as the source of truth."""
+    mw.addonManager.writeConfig(ADDON_ID, deepcopy(conf))
+
+
+def _normalise_legacy_size_keys(data: dict[str, Any], raw: dict[str, Any]) -> bool:
+    changed = False
+    for old_key, value_map in _OLD_SIZE_MAPS.items():
+        new_key = f"{old_key}_px"
+        if new_key in raw or old_key not in raw:
+            continue
+        old_value = str(raw.get(old_key, "")).lower()
+        if old_value in value_map:
+            data[new_key] = value_map[old_value]
+            changed = True
+    return changed
+
+
+def _repair_blank_values(data: dict[str, Any]) -> bool:
+    changed = False
+    for key in DEFAULTS:
+        if key in data and isinstance(data[key], str) and not data[key].strip():
+            data[key] = deepcopy(DEFAULTS[key])
+            changed = True
+    return changed
+
+
+def _try_get_addon_config(name: str) -> dict[str, Any]:
+    try:
+        value = mw.addonManager.getConfig(name)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _migrate_old_addons(data: dict[str, Any], raw: dict[str, Any]) -> bool:
     if not data.get("migrate_old_settings", True):
-        return
-    # Preserve useful settings from the original add-ons when they are present.
+        return False
+
     old_pf = _try_get_addon_config("PassFail2")
     old_king = _try_get_addon_config("374005964")
-
     changed = False
 
     if old_pf:
@@ -84,13 +151,15 @@ def _migrate_once(data: dict[str, Any]) -> None:
             "good_button_textcolor": "light_text_good",
         }
         for old_key, new_key in mapping.items():
-            if old_key in old_pf:
+            if old_key in old_pf and new_key not in raw:
                 data[new_key] = old_pf[old_key]
                 changed = True
-        if "toggle_names_textcolors" in old_pf:
+        if "toggle_names_textcolors" in old_pf and "enable_names" not in raw:
             data["enable_names"] = bool(int(old_pf["toggle_names_textcolors"]))
             changed = True
-        data["button_count"] = 2
+        if "button_count" not in raw:
+            data["button_count"] = 2
+            changed = True
 
     if old_king:
         king_map = {
@@ -103,10 +172,6 @@ def _migrate_once(data: dict[str, Any]) -> None:
             "Nightmode_GoodColor": "dark_background_good",
             "Nightmode_EasyColor": "dark_background_easy",
             "border radius": "border_radius",
-            "button font size": "button_font_size",
-            "button height": "button_height",
-            "button width": "button_width",
-            "answer button width": "answer_button_width",
             "confirmation": "confirmation",
             "confirmation time": "confirmation_time",
             "confirmation x-offset": "confirmation_x_offset",
@@ -115,25 +180,54 @@ def _migrate_once(data: dict[str, Any]) -> None:
             "style main screen buttons": "style_main_screen_buttons",
         }
         for old_key, new_key in king_map.items():
-            if old_key in old_king:
+            if old_key in old_king and new_key not in raw:
                 data[new_key] = old_king[old_key]
                 changed = True
-        old_mode = str(old_king.get("button color", "colors")).lower()
-        if old_mode in {"default", "text", "hover", "colors"}:
-            data["color_mode"] = old_mode
-            changed = True
+
+        size_mappings = {
+            "button font size": "button_font_size_px",
+            "button height": "button_height_px",
+            "button width": "button_width_px",
+            "answer button width": "answer_button_width_px",
+        }
+        for old_key, new_key in size_mappings.items():
+            if new_key in raw or old_key not in old_king:
+                continue
+            value = old_king[old_key]
+            converted = _OLD_SIZE_MAPS.get(new_key.removesuffix("_px"), {}).get(str(value).lower())
+            if converted is not None:
+                data[new_key] = converted
+                changed = True
+
+        if "button color" in old_king and "color_mode" not in raw:
+            old_mode = str(old_king["button color"]).lower()
+            if old_mode in {"default", "text", "hover", "colors"}:
+                data["color_mode"] = old_mode
+                changed = True
 
     if changed:
         data["migrate_old_settings"] = False
-        mw.addonManager.writeConfig(__name__, data)
+    return changed
 
 
-def load() -> dict[str, Any]:
+def load(*, force: bool = False) -> dict[str, Any]:
     global _config
-    if _config is None:
-        _config = _load_raw()
-        _migrate_once(_config)
+    if _config is None or force:
+        defaults = _load_defaults()
+        raw = _load_user_config_from_meta()
+        merged = deepcopy(defaults)
+        merged.update(raw)
+        changed = _normalise_legacy_size_keys(merged, raw)
+        changed = _repair_blank_values(merged) or changed
+        changed = _migrate_old_addons(merged, raw) or changed
+        _config = merged
+        if changed:
+            _write_user_config(_config)
     return _config
+
+
+def reload() -> dict[str, Any]:
+    return load(force=True)
 
 
 def get(key: str, default: Any = None) -> Any:
@@ -146,9 +240,20 @@ def all() -> dict[str, Any]:
 
 def update(values: dict[str, Any]) -> None:
     global _config
-    current = load()
+    current = load(force=True)
     for key in DEFAULTS:
         if key in values:
             current[key] = values[key]
+    _repair_blank_values(current)
     _config = current
-    mw.addonManager.writeConfig(__name__, current)
+    _write_user_config(current)
+
+
+def replace_external(conf: dict[str, Any]) -> None:
+    """Update the in-memory copy after Anki's built-in Config editor saves."""
+    global _config
+    defaults = _load_defaults()
+    merged = deepcopy(defaults)
+    if isinstance(conf, dict):
+        merged.update(conf)
+    _config = merged
